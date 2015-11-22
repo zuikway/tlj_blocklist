@@ -21,5 +21,6 @@ in iptables, or in a shorewall rules file.
 Example shorewall rules entry:
 
 DROP:$LOG    net:+blset      all
+
 DROP:$LOG    all             net:+blset
 
