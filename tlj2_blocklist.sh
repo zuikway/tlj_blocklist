@@ -22,6 +22,7 @@ add_hash_net()
     declare in_file="$1"
     declare ip_net="$2"
     spacer_txt
+    echo 'echo "Generating hash:net '"$ip_net"'"' >> $IPSET_FILE
     echo "ipset -exist create $ip_net hash:net" >> $IPSET_FILE
     echo "ipset flush " $ip_net >> $IPSET_FILE
     awk  '/^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.0\/[0-9]{1,2}/ { print "ipset -exist add '${ip_net}' " $1;}' $in_file >> $IPSET_FILE
@@ -31,15 +32,20 @@ add_hash_net()
   fi
 }
 
+# assumes hash:net entries have been added to hashnet ipset
+# and check to see if hash:ip address already exists before adding
 add_hash_ip()
 {
   if [ -e "$1" ]; then
     local in_file="$1"
     local ip_ip="$2"
     spacer_txt
+    echo 'echo "Generating hash:ip '"$ip_ip"'"' >> $IPSET_FILE
     echo "ipset -exist create $ip_ip hash:ip" >> $IPSET_FILE
     echo "ipset flush " $ip_ip >> $IPSET_FILE
-    awk  '/^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/ { print "ipset -exist add '${ip_ip}' " $1;}' $in_file >> $IPSET_FILE
+    awk  '/^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/ \
+      { print "ipset -q test hashnet "$1" || ipset -exist add '${ip_ip}' " $1";"}' $in_file >> $IPSET_FILE
+#      { print "if ipset -q test hashnet "$1"; then ipset -exist add '${ip_ip}' " $1"; fi"}' $in_file >> $IPSET_FILE
     # add the ipset to the set of ipsets
     echo "ipset add $IPSET " $ip_ip >> $IPSET_FILE
     spacer_txt
@@ -74,8 +80,12 @@ attackers="http://lists.blocklist.de/lists/all.txt"
 
 # list of blocklists to include
 # put attackers last do to size
-#BLLIST=( honey torexit proxies bruteforce emerging spamhaus badguys openbl autoshun attackers )
-BLLIST=( honey proxies bruteforce emerging spamhaus badguys autoshun attackers )
+#BLIPLIST=( honey torexit proxies bruteforce emerging spamhaus badguys openbl autoshun attackers )
+# hash:ip format
+BLIPLIST=( honey proxies bruteforce emerging badguys autoshun )
+# hash:net format
+BLNETLIST=( spamhaus attackers )
+#BLIPLIST=( honey )
 
 # list of wizcrafts.net blocklists to include
 wizlist="chinese nigerian russian lacnic exploited-servers"
@@ -84,7 +94,7 @@ wizlist="chinese nigerian russian lacnic exploited-servers"
 # -- Create the ipset shell script --
 # -----------------------------------
 echo "Generating ipset '$IPSET' in file '$IPSET_FILE'"
-echo "#!/bin/sh" > $IPSET_FILE
+echo "#!/bin/bash" > $IPSET_FILE
 echo "# $IPSET_FILE" >> $IPSET_FILE
 echo "# Blacklist ipset $IPSET" >> $IPSET_FILE
 chmod +x $IPSET_FILE
@@ -95,37 +105,47 @@ echo "ipset flush $IPSET" >> $IPSET_FILE
 
 cd $BL_DIR
 
-# dshield - add as first ipset
+
+// create the hashnet list file
+echo -n "" > hashnet.tmp
+
+# dshield - add as first ipset hash:net
 
 echo "Getting dshield.org block list"
-wget -q -O - http://feeds.dshield.org/block.txt > dshield.tmp
-if test -s dshield.tmp; then
-  sort dshield.tmp -n | uniq > dshield.bl
-fi
-if test -s dshield.bl; then
+wget -q -O - http://feeds.dshield.org/block.txt > dshield.bl
+#if test -s dshield.tmp; then
+#  sort dshield.tmp -n | uniq > dshield.bl
+#fi
+
+#if test -s dshield.bl; then
+if false; then
   spacer_txt
   echo "# http://feeds.dshield.org/block.txt" >> $IPSET_FILE
+  echo 'echo "Generating hash:net dshield"' >> $IPSET_FILE
   echo "ipset -exist create dshield hash:net" >> $IPSET_FILE
   echo "ipset flush dshield" >> $IPSET_FILE
   awk  '/^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.0\t/ { print "ipset -exist add dshield " $1 "/" $3;}' dshield.bl >> $IPSET_FILE
   echo "ipset add $IPSET dshield" >> $IPSET_FILE
   spacer_txt
 fi
+if test -s dshield.bl; then
+  awk  '/^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.0\t/ { print $1 "/" $3;}' dshield.bl >> hashnet.tmp
+fi
 
-# create the wizcrafts hash:net lists
+# get the wizcrafts hash:net lists
 for lst in `echo $wizlist`; do
   echo "getting wizcrafts.net $lst"
   wget --quiet http://www.wizcrafts.net/$lst-iptables-blocklist.html
   # check if file empty, if so, use last file
   if test -s $lst-iptables-blocklist.html; then
-    grep -Po '(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?' $lst-iptables-blocklist.html >  $lst-iptables-blocklist.tmp
-    sort $lst-iptables-blocklist.tmp -n | uniq > $lst-iptables-blocklist.bl
+    grep -Po '(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?' $lst-iptables-blocklist.html >  $lst-iptables-blocklist.bl
   fi
-  add_hash_net $lst-iptables-blocklist.bl $lst
+  if test -s $lst-iptables-blocklist.bl; then
+    cat  $lst-iptables-blocklist.bl >> hashnet.tmp
+  fi
 done
 
-# create the various hash:ip lists
-for lst in ${BLLIST[@]}
+for lst in ${BLNETLIST[@]}
 do
   name=${lst}
   url=${!name}
@@ -133,11 +153,29 @@ do
   curl "$url" > $name.html
   # test if empty file
   if test -s $name.html; then
-    grep -Po '(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?' $name.html > $name.tmp
-    sort $name.tmp -n | uniq > $name.bl
+    grep -Po '(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?' $name.html >> hashnet.tmp
   fi
-  add_hash_ip $name.bl $name
 done
+
+# -----------------------------------------
+# create and get the various hash:ip lists
+// create the haship list file
+echo -n "" > haship.tmp
+
+
+for lst in ${BLIPLIST[@]}
+do
+  name=${lst}
+  url=${!name}
+  echo "Getting list $name from  $url"
+  curl "$url" > $name.html
+  # test if empty file
+  if test -s $name.html; then
+    grep -Po '(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?' $name.html >> $name.bl
+    cat $name.bl >> haship.tmp
+  fi
+done
+
 
 # zeus
 if false; then # abuse.ch seems down at the moment
@@ -146,7 +184,7 @@ if false; then # abuse.ch seems down at the moment
   if test -s zeus.tmp; then
     sort zeus.tmp -n | uniq > zeus.bl
   fi
-  if test -s zeus.tmp; then
+  if test -s zeus.bl; then
     spacer_txt
     echo "# zeustracker.abuse.ch" >> $IPSET_FILE
     echo "ipset -exist create zeus hash:ip" >> $IPSET_FILE
@@ -170,9 +208,16 @@ if false; then
   fi
   spacer_txt
   echo "# www.spamhouse.org" >> $IPSET_FILE
-  add_hash_net drop.bl spam_drop
-  add_hash_net edrop.bl spam_edrop
+  add_hash_net drop.bl spamhaus_drop
+  add_hash_net edrop.bl spamhaus_edrop
 fi
+
+# create the two ipsets for the hash:set
+sort hashnet.tmp -n | uniq > hashnet.bl
+add_hash_net hashnet.bl hashnet
+
+sort haship.tmp -n | uniq > haship.bl
+add_hash_ip haship.bl haship
 
 # cleanup
 rm -f *.html
